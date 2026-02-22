@@ -1,0 +1,56 @@
+task:
+  in_features: 16
+  n_classes: 5
+
+data:
+  input_file: ./data/processed-pythia82-lhc13-all-pt1-50k-r1_h022_e0175_t220_nonu_truth.z
+  config_file: ./datasets/jsc_logicnets/yaml_IP_OP_config.yaml
+  seed: 42
+  val_frac: 0.1
+
+train:
+  batch_size: 1024
+  epochs: 1000
+  lr: 0.001
+  weight_decay: 0.001
+  early_stop_patience: 100
+
+finn:
+  target_clk_mhz: 200
+
+presets:
+  jsc-s:
+    model:
+      hidden: [64, 32, 32, 32]
+      weight_bits: 2
+      input_act_bits: 2
+      hidden_act_bits: 2
+      output_act_bits: 2
+    export:
+      pytorch: results/baseline/jsc-s/jsc-s.pt
+      qonnx_out: results/baseline/jsc-s/jsc-s.qonnx
+      build_dir: results/baseline/jsc-s/build
+
+  jsc-m:
+    model:
+      hidden: [64, 32, 32, 32]
+      weight_bits: 3
+      input_act_bits: 3
+      hidden_act_bits: 3
+      output_act_bits: 3
+    export:
+      pytorch: results/baseline/jsc-m/jsc-m.pt
+      qonnx_out: results/baseline/jsc-m/jsc-m.qonnx
+      build_dir: results/baseline/jsc-m/build
+
+  jsc-l:
+    model:
+      hidden: [32, 64, 192, 192, 16]
+      weight_bits: 3
+      input_act_bits: 4
+      hidden_act_bits: 3
+      output_act_bits: 7
+    export:
+      pytorch: results/baseline/jsc-l/jsc-l.pt
+      qonnx_out: results/baseline/jsc-l/jsc-l.qonnx
+      build_dir: results/baseline/jsc-l/build

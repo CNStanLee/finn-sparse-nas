@@ -1,0 +1,10 @@
+# Configure FINN paths for Docker (run-docker.sh)
+
+path:
+  CWD: "/path/to/finn-sparse-nas"
+  VOLUMES:
+    - "/path/to/finn-sparse-nas"
+  FINN_PATH: "/path/to/finn"
+  FINN_XILINX_PATH: "/path/to/Xilinx"
+  FINN_XILINX_VERSION: "2022.2"
+

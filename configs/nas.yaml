@@ -1,0 +1,70 @@
+# Data
+data:
+  input_file: ./data/processed-pythia82-lhc13-all-pt1-50k-r1_h022_e0175_t220_nonu_truth.z
+  config_file: ./datasets/jsc_logicnets/yaml_IP_OP_config.yaml
+  seed: 42
+  val_frac: 0.1
+
+# Task
+task:
+  in_features: 16
+  n_classes: 5
+
+# Quick train params per candidate
+train:
+  batch_size: 2048
+  val_batch_size: 4096
+  epochs: 16
+  lr: 0.001
+  weight_decay: 0.001
+
+# FINN build params
+finn:
+  target_clk_mhz: 200
+  board: Pynq-Z1
+  shell_flow: VIVADO_ZYNQ
+  folding: latency # not used atm
+  folding_cfg_dir: baselines/finn_jsc/folding_cfgs # not used atm
+  tmp_root: work # all per-candidate outputs here
+
+# Fitness from FINN report + accuracy
+fitness:
+  target_accuracy: 0.90
+  min_acc: 0.73
+  weights:
+    acc: 0.6
+    lut: 0.15
+    dsp: 0.10
+    bram: 0.10
+    latency: 0.05
+  # Normalizers to keep terms ~O(1)
+  norm:
+    lut: 50000
+    dsp: 200
+    bram_18k: 100
+    latency_ns: 1000
+
+# EA search space
+search:
+  widths: [16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320]
+  min_layers: 2
+  max_layers: 6
+  quant_space:
+    weight_bits: [2, 3, 4, 8]
+    act_bits:    [3, 4, 8]
+    out_bits:    [3, 4, 7, 8]
+
+# EA loop
+ea:
+  pop_size: 30
+  generations: 20
+  elitism: 1
+  randoms: 4
+  cxpb: 0.3
+  mutpb: 0.9
+  tournsize: 2
+  root_path: results/nas
+  pickle_path: search.pkl
+  csv_out: search.csv
+  cuda: true
+  seed: 123
