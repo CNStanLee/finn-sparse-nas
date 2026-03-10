@@ -22,41 +22,57 @@ def fitness_from_report(rep, cfg, acc):
     return float(W["acc"] * acc_term) + (W["lut"] * lut) + (W["dsp"] * dsp) + (W["bram"] * bram) + (W["latency"] * lat)
 
 
+def pareto_objectives_from_row(row, cfg):
+    if not bool(row.get("evaluated", True)):
+        return (0.0, np.inf, np.inf, np.inf, np.inf)
+    N = cfg["fitness"]["norm"]
+    acc = float(row["val_acc"])
+    lut = float(row["LUT"]) / max(1.0, float(N["lut"])) if pd.notna(row["LUT"]) else np.inf
+    dsp = float(row["DSP"]) / max(1.0, float(N["dsp"])) if pd.notna(row["DSP"]) else np.inf
+    brm = float(row["BRAM_18K"]) / max(1.0, float(N["bram_18k"])) if pd.notna(row["BRAM_18K"]) else np.inf
+    lat = float(row["latency_ns"]) / max(1.0, float(N["latency_ns"])) if pd.notna(row["latency_ns"]) else np.inf
+    return (acc, lut, dsp, brm, lat)
+
+
 def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path, wpath, g, hsh, acc):
+    max_retries = cfg["finn"]["max_retries"]; ret = -1
     with sem:
-        with tempfile.TemporaryDirectory(dir="/dev/shm") as td:
-            # export QONNX and build FINN inside container
-            _finn_cfg = copy.deepcopy(finn_cfg)
-            _finn_cfg["path"]["tmp"] = td
-            cmd = (
-                f"python -m nas.build_finn "
-                f"--cfg {shlex.quote(cfg['_cfg_path'])} "
-                f"--cand {shlex.quote(str(cand_path))} "
-                f"--weights {shlex.quote(str(wpath))} "
-                f"--qonnx {shlex.quote(str(qonnx))} "
-                f"--build_dir {shlex.quote(str(bdir))}"
-            )
-            ret = run_docker(cmd, _finn_cfg, str(bdir), name=str(hsh))
+        for attempt in range(1, max_retries + 1):
+            with tempfile.TemporaryDirectory(dir="/dev/shm") as td:
+                # export QONNX and build FINN inside container
+                _finn_cfg = copy.deepcopy(finn_cfg)
+                _finn_cfg["path"]["tmp"] = td
+                cmd = (
+                    f"python -m nas.build_finn "
+                    f"--cfg {shlex.quote(cfg['_cfg_path'])} "
+                    f"--cand {shlex.quote(str(cand_path))} "
+                    f"--weights {shlex.quote(str(wpath))} "
+                    f"--qonnx {shlex.quote(str(qonnx))} "
+                    f"--build_dir {shlex.quote(str(bdir))}"
+                )
+                ret = run_docker(cmd, _finn_cfg, str(bdir), name=f"{hsh}_att{attempt}")
+                if ret == 0:
+                    break
+                print(f"  [NAS] Attempt {attempt}/{max_retries} failed for {hsh}, "
+                      f"rc={ret}" + (" — retrying..." if attempt < max_retries else " — giving up."))
 
-            if ret == 0:
-                rep = parse_build(bdir)
-                with open(bdir / "report_summary.json", "w") as f:
-                    json.dump(rep, f, indent=2)
-                print("[NAS] Parsed FINN report ->", bdir / "report_summary.json")
+        if ret == 0:
+            rep = parse_build(bdir)
+            with open(bdir / "report_summary.json", "w") as f:
+                json.dump(rep, f, indent=2)
+            print("[NAS] Parsed FINN report ->", bdir / "report_summary.json")
+            s = rep.get("summary", {})
+            lut  = int(s.get("total_LUT", 0));      dsp  = int(s.get("total_DSP", 0))
+            bram = int(s.get("total_BRAM_18K", 0)); lat  = float(s.get("latency_ns", 0))
+            fit = fitness_from_report(rep, cfg, acc)
+            with recs_lock:
+                recs.append([g, hsh, cand, fit, acc, lut, dsp, bram, lat, str(bdir / "report_summary.json"), True])
+            print(f" {cand['hidden']} {cand['quant']} -> acc={acc:.3f} fit={fit:.4f}  LUT={lut} DSP={dsp} BRAM={bram} lat_ns={lat}")
+        else:
+            with recs_lock:
+                recs.append([g, hsh, cand, np.inf, acc, np.nan, np.nan, np.nan, np.nan, "", False])
 
-                s = rep.get("summary", {})
-                lut  = int(s.get("total_LUT", 0));      dsp  = int(s.get("total_DSP", 0))
-                bram = int(s.get("total_BRAM_18K", 0)); lat  = float(s.get("latency_ns", 0))
-
-                fit = fitness_from_report(rep, cfg, acc)
-                with recs_lock:
-                    recs.append([g, hsh, cand, fit, acc, lut, dsp, bram, lat, str(bdir / "report_summary.json"), True])
-                print(f" {cand['hidden']} {cand['quant']} -> acc={acc:.3f} fit={fit:.4f}  LUT={lut} DSP={dsp} BRAM={bram} lat_ns={lat}")
-            else:
-                with recs_lock:
-                    recs.append([g, hsh, cand, np.inf, acc, np.nan, np.nan, np.nan, np.nan, "", False])
-
-            return ret
+        return ret
 
 
 def ea_loop(cfg, finn_cfg, run_dir):
@@ -72,27 +88,44 @@ def ea_loop(cfg, finn_cfg, run_dir):
     # EA helpers / operator functions
     random_cand, freeze_cand, repair_cand, cx_cand, mut_cand = make_ea_ops(cfg)
 
-    # DEAP setup
-    try:
-        creator.FitnessMin
-    except AttributeError:
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-    try:
-        creator.Individual
-    except AttributeError:
-        creator.create("Individual", dict, fitness=creator.FitnessMin)
+    # DEAP setup: single-objective EA or multi-objective (Pareto)
+    mode = (cfg["ea"].get("mode", "single").lower() == "pareto")
+    print(f"\nEA mode selected: {cfg["ea"].get("mode", "single").upper()}")
+
+    if mode: # pareto
+        try:
+            creator.FitnessMO
+        except AttributeError:
+            # maximize acc, minimize lut/dsp/bram/lat
+            creator.create("FitnessMO", base.Fitness, weights=(1.0, -1.0, -1.0, -1.0, -1.0))
+        try:
+            creator.IndividualMO
+        except AttributeError:
+            creator.create("IndividualMO", dict, fitness=creator.FitnessMO)
+        IndCls = creator.IndividualMO
+    else: # single
+        try:
+            creator.FitnessMin
+        except AttributeError:
+            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+        try:
+            creator.Individual
+        except AttributeError:
+            creator.create("Individual", dict, fitness=creator.FitnessMin)
+        IndCls = creator.Individual
 
     toolbox = base.Toolbox()
-    toolbox.register("individual", tools.initIterate, creator.Individual, random_cand)
+    toolbox.register("individual", tools.initIterate, IndCls, random_cand)
     toolbox.register("clone", copy.deepcopy)
     toolbox.register("mate", cx_cand)
     toolbox.register("mutate", mut_cand)
-    toolbox.register("select", tools.selTournament, tournsize=cfg["ea"]["tournsize"])
+    if not mode:
+        toolbox.register("select", tools.selTournament, tournsize=cfg["ea"]["tournsize"])
 
     def as_ind(c):
-        if isinstance(c, creator.Individual):
+        if isinstance(c, IndCls):
             return repair_cand(c)
-        return repair_cand(creator.Individual(copy.deepcopy(dict(c))))
+        return repair_cand(IndCls(copy.deepcopy(dict(c))))
 
     # init population
     if df.empty:
@@ -122,7 +155,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
                 row = old.iloc[0]
                 with recs_lock:
                     recs.append([g, hsh, row["cand"], row["fitness"], row["val_acc"], row["LUT"], row["DSP"], row["BRAM_18K"], row["latency_ns"], row["report_path"], True])
-                print(f"  cached {row["cand"]['hidden']} q={row["cand"]['quant']} -> acc={row['val_acc']:.3f} fit={row['fitness']:.4f}")
+                print(f"  cached {row['cand']['hidden']} q={row['cand']['quant']} -> acc={row['val_acc']:.3f} fit={row['fitness']:.4f}")
                 continue
 
             wrk = run_dir / pathlib.Path(cfg["finn"]["tmp_root"]) / hsh
@@ -153,17 +186,28 @@ def ea_loop(cfg, finn_cfg, run_dir):
 
         # persist unique best-per-architecture (avoid dupes)
         persist = gen_df.copy() if df.empty else pd.concat([df, gen_df], ignore_index=True)
-        persist = (persist.sort_values(["fitness", "val_acc"], ascending=[True, False]).drop_duplicates("hash", keep="first"))
+        if not mode:
+            persist = persist.sort_values(["fitness", "val_acc"], ascending=[True, False]).drop_duplicates("hash", keep="first")
+        else:
+            persist = persist.sort_values(["val_acc"], ascending=[False]).drop_duplicates("hash", keep="first")
         persist.to_pickle(pkl)
         persist.to_csv(run_dir / pathlib.Path(cfg["ea"]["csv_out"]), index=False)
         df = persist
 
         # assign DEAP fitness values for selection (lower is better)
         best_per_hash = (gen_df.sort_values(["fitness", "val_acc"], ascending=[True, False]).drop_duplicates("hash", keep="first"))
-        fit_map = dict(zip(best_per_hash["hash"], best_per_hash["fitness"]))
-        for ind in pop:
-            hsh = cand_hash(ind, cfg)
-            ind.fitness.values = (float(fit_map.get(hsh, np.inf)),)
+        if not mode:
+            fit_map = dict(zip(best_per_hash["hash"], best_per_hash["fitness"]))
+            for ind in pop:
+                hsh = cand_hash(ind, cfg)
+                ind.fitness.values = (float(fit_map.get(hsh, np.inf)),)
+        else:
+            # build objective map for this generation
+            obj_map = {row["hash"]: pareto_objectives_from_row(row, cfg) for _, row in best_per_hash.iterrows()}
+            for ind in pop:
+                hsh = cand_hash(ind, cfg)
+                ind.fitness.values = obj_map.get(hsh, (0.0, np.inf, np.inf, np.inf, np.inf))
+            pop = tools.selNSGA2(pop, k=len(pop)) # crowding distance + sorting for NSGA-II
 
         # DEAP reproduction (selection / mate / mutate)
         elite_k = int(cfg["ea"]["elitism"])
@@ -171,8 +215,14 @@ def ea_loop(cfg, finn_cfg, run_dir):
         pop_size = int(cfg["ea"]["pop_size"])
         n_off = max(0, pop_size - elite_k - rand_k)
 
-        elites = list(map(toolbox.clone, tools.selBest(pop, k=elite_k))) if elite_k > 0 else []
-        offspring = list(map(toolbox.clone, toolbox.select(pop, k=n_off))) if n_off > 0 else []
+        if not mode:
+            elites = list(map(toolbox.clone, tools.selBest(pop, k=elite_k))) if elite_k > 0 else []
+            offspring = list(map(toolbox.clone, toolbox.select(pop, k=n_off))) if n_off > 0 else []
+        else:
+            # NSGA-II selection pressure
+            elites = list(map(toolbox.clone, pop[:elite_k])) if elite_k > 0 else []
+            parents = tools.selNSGA2(pop, k=max(n_off, 0)) if n_off > 0 else []
+            offspring = list(map(toolbox.clone, parents))
 
         # crossover in pairs
         for i in range(1, len(offspring), 2):
@@ -216,14 +266,38 @@ def ea_loop(cfg, finn_cfg, run_dir):
 
         pop = uniq_pad(elites + offspring + rands, pop_size)
 
-    print("\n[NAS] Top 10:")
-    top = (df[df["evaluated"] == True]
-            .sort_values(["fitness", "val_acc"], ascending=[True, False])
-            .drop_duplicates("hash", keep="first")
-            .head(10).copy())
-    top = top.reset_index(drop=True)
-    top["cand_brief"] = top["cand"].apply(lambda c: f"h={c.get('hidden', [])} q={c.get('quant', {})}")
-    print(top[["cand_brief","fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns"]])
+
+    if not mode:
+        print("\n[NAS] Top 10:")
+        top = (df[df["evaluated"] == True]
+                .sort_values(["fitness", "val_acc"], ascending=[True, False])
+                .drop_duplicates("hash", keep="first")
+                .head(10).copy())
+        top = top.reset_index(drop=True)
+        top["cand_brief"] = top["cand"].apply(lambda c: f"h={c.get('hidden', [])} q={c.get('quant', {})}")
+        print(top[["cand_brief","fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns"]])
+    else:
+        print("\n[NAS] Pareto front (first nondominated set):")
+        rows = df[df["evaluated"] == True].drop_duplicates("hash", keep="first").copy()
+        # rows = rows[rows["val_acc"] >= cfg["fitness"]["min_acc"]] # (optional) only show reasonable accuracies
+        inds = []
+        for _, r in rows.iterrows():
+            ind = IndCls(copy.deepcopy(dict(r["cand"])))
+            ind.fitness.values = pareto_objectives_from_row(r, cfg)
+            inds.append(ind)
+        front = tools.sortNondominated(inds, k=len(inds), first_front_only=True)[0]
+        # build a small table
+        front_rows = []
+        for ind in front:
+            hsh = cand_hash(ind, cfg)
+            rr = rows[rows["hash"] == hsh].iloc[0]
+            front_rows.append(rr)
+        pf = pd.DataFrame(front_rows).drop_duplicates("hash", keep="first")
+        pf = pf.sort_values(["val_acc"], ascending=False).reset_index(drop=True)
+        pf["cand_brief"] = pf["cand"].apply(lambda c: f"h={c.get('hidden', [])} q={c.get('quant', {})}")
+        # save and print
+        pf[["hash","cand","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].to_csv(run_dir / "pareto_front.csv", index=False)
+        print(pf[["cand_brief","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].head(15))
 
 
 def main():

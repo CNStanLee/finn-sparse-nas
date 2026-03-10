@@ -22,7 +22,15 @@ cd {shlex.quote(finn_cfg["path"]["FINN_PATH"])}
 """
     out_log = build_dir / pathlib.Path(f"docker.out.log"); out_log.parent.mkdir(parents=True, exist_ok=True)
     err_log = build_dir / pathlib.Path(f"docker.err.log"); err_log.parent.mkdir(parents=True, exist_ok=True)
+    timeout = 900 # 15 minutes
+    
     with open(out_log or os.devnull, "w", encoding="utf-8") as fo, open(err_log or os.devnull, "w", encoding="utf-8") as fe:
-        proc = subprocess.run(["bash", "-s"], input=docker_cmd, text=True, stdout=fo, stderr=fe)
-
-    return proc.returncode
+        try:
+            proc = subprocess.run(["bash", "-s"], input=docker_cmd, text=True, stdout=fo, stderr=fe, timeout=timeout)
+            return proc.returncode
+        except subprocess.TimeoutExpired:
+            print(f"[FINN] Docker job timed out after {timeout}s, killing container {name}" if name else "")
+            if name:
+                subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            return -1

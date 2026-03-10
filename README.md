@@ -57,8 +57,9 @@ python -m baselines.finn_jsc.main --cfg configs/baseline.yaml --finn-cfg configs
 ├── models
 │   └── brevitas_mlp.py                         # dense MLP using Brevitas
 ├── nas
-│   ├── build_finn.py                           # FINN estimate build inside Docker container
+│   ├── build_finn.py                           # FINN build inside Docker container
 │   ├── ea_ops.py                               # EA operators and helpers
+│   ├── finalise_topk.py                        # final validation for top K architectures
 │   ├── nas_main.py                             # EA driver (NAS search loop)
 │   ├── run.sh
 │   ├── train.py                                # Pytorch training 

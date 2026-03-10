@@ -18,8 +18,18 @@ train:
   lr: 0.001
   weight_decay: 0.001
 
+# Full train for finalists
+train_full:
+  epochs: 1000
+  lr: 0.001
+  weight_decay: 0.001
+  early_stop_patience: 50
+  min_delta: 0.0001
+  min_epochs: 50
+
 # FINN build params
 finn:
+  max_retries: 5
   target_clk_mhz: 200
   board: Pynq-Z1
   shell_flow: VIVADO_ZYNQ
@@ -56,6 +66,7 @@ search:
 
 # EA loop
 ea:
+  mode: single # single | pareto
   pop_size: 30
   generations: 20
   elitism: 1

@@ -6,6 +6,16 @@ import finn.builder.build_dataflow as build
 import finn.builder.build_dataflow_config as build_cfg
 
 
+def parse_outputs(s: str):
+    outs = []
+    for tok in (t.strip() for t in s.split(",") if t.strip()):
+        try:
+            outs.append(build_cfg.DataflowOutputType(tok))
+        except Exception:
+            outs.append(build_cfg.DataflowOutputType[tok.upper()])
+    return outs
+
+
 def mhz_to_period_ns(clk_mhz: float) -> float:
     return 1000.0 / float(clk_mhz)
 
@@ -35,12 +45,13 @@ def qonnx_export(cfg, cand, weights, qonnx):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg", required=True)                # nas.yaml
-    ap.add_argument("--cand", required=True)               # path to candidate json
-    ap.add_argument("--weights", required=True)            # path to .pt
-    ap.add_argument("--qonnx", required=True)              # path to qonnx
-    # ap.add_argument("--folding_cfg", required=True)        # folding config JSON path
-    ap.add_argument("--build_dir", required=True)          # per-candidate build dir
+    ap.add_argument("--cfg", required=True)                     # nas.yaml
+    ap.add_argument("--cand", required=True)                    # path to candidate json
+    ap.add_argument("--weights", required=True)                 # path to .pt
+    ap.add_argument("--qonnx", required=True)                   # path to qonnx
+    # ap.add_argument("--folding_cfg", required=True)           # folding config JSON path
+    ap.add_argument("--build_dir", required=True)               # per-candidate build dir
+    ap.add_argument("--outputs", default="estimate_reports")    # comma-separated FINN outputs
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
@@ -48,6 +59,7 @@ def main():
 
     qonnx_export(cfg, cand, args.weights, args.qonnx)
 
+    generate_outputs = parse_outputs(args.outputs)
     shell = getattr(build_cfg.ShellFlowType, cfg["finn"]["shell_flow"])
     out = pathlib.Path(args.build_dir); out.mkdir(parents=True, exist_ok=True)
 
@@ -58,9 +70,10 @@ def main():
         shell_flow_type=shell,
         # folding_config_file=args.folding_cfg,
         target_fps=1000,
-        generate_outputs=[build_cfg.DataflowOutputType.ESTIMATE_REPORTS],
+        generate_outputs=generate_outputs,
         save_intermediate_models=True,
-        minimize_bit_width=True
+        minimize_bit_width=True,
+        enable_build_pdb_debug=False
     )
 
     rc = build.build_dataflow_cfg(args.qonnx, bcfg)
