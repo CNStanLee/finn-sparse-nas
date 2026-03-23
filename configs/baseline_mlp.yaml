@@ -10,13 +10,15 @@ data:
 
 train:
   batch_size: 1024
-  epochs: 1000
+  epochs: 100
   lr: 0.001
   weight_decay: 0.001
-  early_stop_patience: 100
 
 finn:
+  max_retries: 5
   target_clk_mhz: 200
+  board: Ultra96-V2
+  shell_flow: VIVADO_ZYNQ
 
 presets:
   jsc-s:

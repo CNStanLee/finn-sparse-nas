@@ -1,0 +1,65 @@
+task:
+  in_channels: 3
+  img_h: 32
+  img_w: 32
+  n_classes: 10
+
+data:
+  root: ./data/cifar10
+  download: true
+  val_frac: 0.0
+  seed: 42
+
+train:
+  batch_size: 100
+  lr: 0.02
+  weight_decay: 0.0
+  lr_decay_every: 40
+  lr_decay_factor: 0.5
+
+finn:
+  max_retries: 5
+  target_clk_mhz: 200
+  board: Ultra96-V2
+  shell_flow: VIVADO_ZYNQ
+  specialize_layers_config: baselines/finn_cifar10/folding_cfgs/cnv_specialize_layers.json
+
+presets:
+  cnv_1w1a:
+    model:
+      weight_bits: 1
+      act_bits: 1
+      input_bits: 8
+    train:
+      epochs: 1000
+    folding: baselines/finn_cifar10/folding_cfgs/cnv_1w1a.json
+    export:
+      pytorch: results/baseline/cnv_1w1a/cnv_1w1a.pt
+      qonnx_out: results/baseline/cnv_1w1a/cnv_1w1a.qonnx
+      build_dir: results/baseline/cnv_1w1a/build
+
+  cnv_1w2a:
+    model:
+      weight_bits: 1
+      act_bits: 2
+      input_bits: 8
+    train:
+      epochs: 500
+    folding: baselines/finn_cifar10/folding_cfgs/cnv_1w2a.json
+    export:
+      pytorch: results/baseline/cnv_1w2a/cnv_1w2a.pt
+      qonnx_out: results/baseline/cnv_1w2a/cnv_1w2a.qonnx
+      build_dir: results/baseline/cnv_1w2a/build
+
+  cnv_2w2a:
+    model:
+      weight_bits: 2
+      act_bits: 2
+      input_bits: 8
+    train:
+      epochs: 500
+    folding: baselines/finn_cifar10/folding_cfgs/cnv_2w2a.json
+    export:
+      pytorch: results/baseline/cnv_2w2a/cnv_2w2a.pt
+      qonnx_out: results/baseline/cnv_2w2a/cnv_2w2a.qonnx
+      build_dir: results/baseline/cnv_2w2a/build

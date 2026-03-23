@@ -12,11 +12,11 @@ from finn_integration.report_parser import parse_build
 
 def fitness_from_report(rep, cfg, acc):
     W = cfg["fitness"]["weights"]; N = cfg["fitness"]["norm"]
-    r = rep["summary"]
-    lut = r.get("total_LUT", 0)         / max(1, N["lut"])
-    dsp = r.get("total_DSP", 0)         / max(1, N["dsp"])
-    bram = r.get("total_BRAM_18K", 0)   / max(1, N["bram_18k"])
-    lat = r.get("latency_ns", 0)        / max(1, N["latency_ns"])
+    r = rep["estimate"]
+    lut = r.get("LUT", 0)         / max(1, N["lut"])
+    dsp = r.get("DSP", 0)         / max(1, N["dsp"])
+    bram = r.get("BRAM_18K", 0)   / max(1, N["bram_18k"])
+    lat = r.get("latency_ns", 0)  / max(1, N["latency_ns"])
     acc_term = 0.0 if acc >= cfg["fitness"]["min_acc"] else max(0.0, cfg["fitness"]["target_accuracy"] - acc)
     # final fitness: lower is better
     return float(W["acc"] * acc_term) + (W["lut"] * lut) + (W["dsp"] * dsp) + (W["bram"] * bram) + (W["latency"] * lat)
@@ -54,16 +54,16 @@ def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path
                 if ret == 0:
                     break
                 print(f"  [NAS] Attempt {attempt}/{max_retries} failed for {hsh}, "
-                      f"rc={ret}" + (" — retrying..." if attempt < max_retries else " — giving up."))
+                      f"rc={ret}" + (" - retrying..." if attempt < max_retries else " - giving up."))
 
         if ret == 0:
             rep = parse_build(bdir)
             with open(bdir / "report_summary.json", "w") as f:
                 json.dump(rep, f, indent=2)
             print("[NAS] Parsed FINN report ->", bdir / "report_summary.json")
-            s = rep.get("summary", {})
-            lut  = int(s.get("total_LUT", 0));      dsp  = int(s.get("total_DSP", 0))
-            bram = int(s.get("total_BRAM_18K", 0)); lat  = float(s.get("latency_ns", 0))
+            s = rep.get("estimate", {})
+            lut  = int(s.get("LUT", 0));      dsp  = int(s.get("DSP", 0))
+            bram = int(s.get("BRAM_18K", 0)); lat  = float(s.get("latency_ns", 0))
             fit = fitness_from_report(rep, cfg, acc)
             with recs_lock:
                 recs.append([g, hsh, cand, fit, acc, lut, dsp, bram, lat, str(bdir / "report_summary.json"), True])
@@ -302,7 +302,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg", default="configs/nas.yaml")
+    ap.add_argument("--cfg", default="configs/nas_mlp.yaml")
     ap.add_argument("--finn-cfg", default="configs/finn.yaml")
     ap.add_argument("--run-id", default=None, help="Directory name for this run")
     args = ap.parse_args()

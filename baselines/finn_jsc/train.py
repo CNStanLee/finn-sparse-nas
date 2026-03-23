@@ -24,8 +24,8 @@ def train(cfg, arch):
     ds_te = JetSubstructureDataset(cfg["data"]["input_file"], cfg["data"]["config_file"], split="test",  val_frac=cfg["data"]["val_frac"], seed=cfg["data"]["seed"])
 
     dl_train = DataLoader(ds_tr, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True)
-    dl_val   = DataLoader(ds_va, batch_size=1024)
-    dl_test  = DataLoader(ds_te, batch_size=1024)
+    dl_val   = DataLoader(ds_va, batch_size=1024, shuffle=False)
+    dl_test  = DataLoader(ds_te, batch_size=1024, shuffle=False)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -42,14 +42,12 @@ def train(cfg, arch):
 
     opt = torch.optim.AdamW(m.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
     best = {"epoch": -1, "acc_val": 0.0}
-    patience, bad = cfg["train"].get("early_stop_patience", 0), 0
 
     for epoch in range(cfg["train"]["epochs"]):
         m.train()
         for xb, yb in dl_train:
             xb, yb = xb.to(device), yb.to(device)
-            logits = m(xb)
-            loss = torch.nn.functional.cross_entropy(logits, yb)
+            loss = torch.nn.functional.cross_entropy(m(xb), yb)
             opt.zero_grad(); loss.backward(); opt.step()
 
         # val
@@ -58,11 +56,7 @@ def train(cfg, arch):
 
         if acc_val > best["acc_val"]:
             best = {"epoch": epoch, "acc_val": acc_val}; 
-            bad = 0
             torch.save(m.state_dict(), cfg["presets"][arch]["export"]["pytorch"])
-        else:
-            bad += 1
-            if patience and bad >= patience: break
 
     # test
     m.load_state_dict(torch.load(cfg["presets"][arch]["export"]["pytorch"], map_location=device))

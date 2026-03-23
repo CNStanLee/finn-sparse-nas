@@ -27,11 +27,23 @@ train_full:
   min_delta: 0.0001
   min_epochs: 50
 
+# Optional post-hoc pruning and finetuning for finalists
+finalists:
+  pruning:
+    unstructured: [0.0, 0.3, 0.5, 0.7]
+    structured: [1.0, 0.75, 0.5]
+    baseline: [0.0]
+  finetune:
+    epochs: 25
+    lr: 0.0003
+    weight_decay: 0.001
+    early_stop_patience: 10
+
 # FINN build params
 finn:
   max_retries: 5
   target_clk_mhz: 200
-  board: Pynq-Z1
+  board: Ultra96-V2
   shell_flow: VIVADO_ZYNQ
   folding: latency # not used atm
   folding_cfg_dir: baselines/finn_jsc/folding_cfgs # not used atm

@@ -17,53 +17,77 @@ wget https://cernbox.cern.ch/s/jvFd5MoWhGs1l5v/download -O data/processed-pythia
 
 ## Running
 
-The NAS implementation:
+The NAS JSC implementation:
 
 ```python
-python -m nas.nas_main --cfg configs/nas.yaml --finn-cfg configs/finn.yaml
+python -m nas.nas_main --cfg configs/nas_mlp.yaml --finn-cfg configs/finn.yaml
 ```
+
 The FINN-JSC baseline (define the --arch param to be either one of jsc-s, jsc-m or jsc-l):
 
 ```python
-python -m baselines.finn_jsc.main --cfg configs/baseline.yaml --finn-cfg configs/finn.yaml --arch jsc-s
+python -m baselines.finn_jsc.main --cfg configs/baseline_mlp.yaml --finn-cfg configs/finn.yaml --arch jsc-s
+```
+
+The FINN CIFAR-10 baseline (--arch can be cnv_1w1a, cnv_1w2a or cnv_2w2a):
+
+```python
+python -m baselines.finn_cifar10.main --cfg configs/baseline_cnv.yaml --finn-cfg configs/finn.yaml --arch cnv_1w1a
 ```
 
 ## Layout
 
 ```
 .
-├── baselines                                   # direct comparison to JSC Logicnets
-│   └── finn_jsc                                # but using FINN instead
+├── baselines
+│   ├── finn_cifar10                            # faithful FINN baseline for Brevitas CIFAR-10 CNV presets
+│   │   ├── build_finn.py
+│   │   ├── folding_cfgs
+│   │   │   ├── cnv_1w1a.json
+│   │   │   ├── cnv_1w2a.json
+│   │   │   ├── cnv_2w2a.json
+│   │   │   └── cnv_specialize_layers.json
+│   │   ├── main.py
+│   │   ├── run.sh
+│   │   └── train.py
+│   └── finn_jsc                                # faithful FINN baseline for the LogicNets JSC MLP presets
+│       ├── build_finn.py
 │       ├── folding_cfgs
 │       │   ├── folding_jsc-l_latency.json
 │       │   ├── folding_jsc-l_resource.json
 │       │   ├── folding_jsc-s_latency.json
 │       │   └── folding_jsc-s_resource.json
-│       ├── build_finn.py
 │       ├── main.py
 │       ├── run.sh
 │       └── train.py
 ├── configs
-│   ├── baseline.yaml
-│   ├── finn.yaml
-│   └── nas.yaml
+│   ├── baseline_cnv.yaml                       # config for CIFAR-10 CNV baselines and preset exports
+│   ├── baseline_mlp.yaml                       # config for JSC MLP baselines and preset exports
+│   ├── finn.yaml                               # Docker / FINN runtime settings shared across builds
+│   ├── nas_cnv.yaml                            # NAS search space and training settings for CNV experiments
+│   └── nas_mlp.yaml                            # NAS search space and training settings for MLP experiments
 ├── datasets
+│   ├── cifar10
+│   │   └── dataset.py                          # CIFAR-10 dataset wrapper with train / val / test splits
 │   └── jsc_logicnets
-│       ├── dataset.py                          # dataset generation (from LogicNets repo)
-│       └── yaml_IP_OP_config.yaml
+│       ├── dataset.py                          # Jet Substructure dataset wrapper adapted from LogicNets
+│       └── yaml_IP_OP_config.yaml              # original LogicNets feature / label dataset description
 ├── finn_integration
-│   ├── finn_client.py                          # run-docker.sh helper
-│   └── report_parser.py                        # parses FINN build reports
+│   ├── finn_client.py                          # helper for launching FINN builds inside Docker
+│   └── report_parser.py                        # parses FINN build artifacts into compact JSON summaries
 ├── models
-│   └── brevitas_mlp.py                         # dense MLP using Brevitas
+│   ├── brevitas_cnv.py                         # Brevitas-based quantised CNV model adapted for this project
+│   └── brevitas_mlp.py                         # Brevitas-based quantised dense MLP for Jet Substructure
 ├── nas
-│   ├── build_finn.py                           # FINN build inside Docker container
-│   ├── ea_ops.py                               # EA operators and helpers
-│   ├── finalise_topk.py                        # final validation for top K architectures
-│   ├── nas_main.py                             # EA driver (NAS search loop)
+│   ├── build_finn.py                           # candidate-based QONNX export and FINN build entry point
+│   ├── ea_ops.py                               # evolutionary search operators: sampling, mutation, crossover
+│   ├── finalise_topk.py                        # trains top-K candidates fully, applies pruning, and runs final FINN builds
+│   ├── nas_main.py                             # main evolutionary NAS loop with caching and candidate evaluation
 │   ├── run.sh
-│   ├── train.py                                # Pytorch training 
-│   └── utils.py                                # other small helpers (hash, caching)
+│   ├── structured_pruning.py                   # structured neuron pruning utilities and structured sweep helpers
+│   ├── train.py                                # shared training / evaluation utilities for NAS candidates
+│   ├── unstructured_pruning.py                 # unstructured weight pruning utilities
+│   └── utils.py                                # shared helpers: hashing, JSON export, directories, small utilities
 ├── README.md
 └── requirements.txt
 ```

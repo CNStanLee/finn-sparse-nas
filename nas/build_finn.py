@@ -49,9 +49,9 @@ def main():
     ap.add_argument("--cand", required=True)                    # path to candidate json
     ap.add_argument("--weights", required=True)                 # path to .pt
     ap.add_argument("--qonnx", required=True)                   # path to qonnx
-    # ap.add_argument("--folding_cfg", required=True)           # folding config JSON path
     ap.add_argument("--build_dir", required=True)               # per-candidate build dir
     ap.add_argument("--outputs", default="estimate_reports")    # comma-separated FINN outputs
+    ap.add_argument("--folding_cfg", default=None)              # folding config JSON path
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
@@ -63,18 +63,22 @@ def main():
     shell = getattr(build_cfg.ShellFlowType, cfg["finn"]["shell_flow"])
     out = pathlib.Path(args.build_dir); out.mkdir(parents=True, exist_ok=True)
 
-    bcfg = build_cfg.DataflowBuildConfig(
+    build_kwargs = dict(
         output_dir=str(out),
         synth_clk_period_ns=mhz_to_period_ns(float(cfg["finn"]["target_clk_mhz"])),
         board=cfg["finn"]["board"],
         shell_flow_type=shell,
-        # folding_config_file=args.folding_cfg,
         target_fps=1000,
         generate_outputs=generate_outputs,
         save_intermediate_models=True,
         minimize_bit_width=True,
         enable_build_pdb_debug=False
     )
+
+    if args.folding_cfg is not None and str(args.folding_cfg).strip() != "":
+        build_kwargs["folding_config_file"] = args.folding_cfg
+
+    bcfg = build_cfg.DataflowBuildConfig(**build_kwargs)
 
     rc = build.build_dataflow_cfg(args.qonnx, bcfg)
     if rc != 0: raise SystemExit(rc)

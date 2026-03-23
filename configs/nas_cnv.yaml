@@ -1,0 +1,13 @@
+# Data
+data:
+  root: ./data/cifar10
+  download: true
+  seed: 42
+  val_frac: 0.1
+
+# Task
+task:
+  in_channels: 3
+  img_h: 32
+  img_w: 32
+  n_classes: 10

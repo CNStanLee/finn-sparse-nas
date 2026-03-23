@@ -22,7 +22,7 @@ cd {shlex.quote(finn_cfg["path"]["FINN_PATH"])}
 """
     out_log = build_dir / pathlib.Path(f"docker.out.log"); out_log.parent.mkdir(parents=True, exist_ok=True)
     err_log = build_dir / pathlib.Path(f"docker.err.log"); err_log.parent.mkdir(parents=True, exist_ok=True)
-    timeout = 900 # 15 minutes
+    timeout = 3600
     
     with open(out_log or os.devnull, "w", encoding="utf-8") as fo, open(err_log or os.devnull, "w", encoding="utf-8") as fe:
         try:
