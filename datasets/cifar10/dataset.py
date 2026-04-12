@@ -79,3 +79,10 @@ class CIFAR10Dataset(Dataset):
         else:
             x, y = self.base_dataset[self.indices[idx]]
         return x, y
+    
+
+    def get_targets(self):
+        labels = self.base_dataset.targets
+        if self.indices is not None:
+            labels = [labels[i] for i in self.indices]
+        return torch.as_tensor(labels, dtype=torch.long)

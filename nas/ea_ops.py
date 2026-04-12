@@ -1,8 +1,19 @@
 import random
 
+
 def make_ea_ops(cfg):
+    task_name = cfg["task"]["name"]
+    if task_name == "jsc_mlp":
+        return make_mlp_ea_ops(cfg)
+    elif task_name == "cifar10_cnv":
+        return make_cnv_ea_ops(cfg)
+    else:
+        raise ValueError(f"Unsupported task name: {task_name}")
+
+
+def make_mlp_ea_ops(cfg):
     """
-    Returns EA helper/operator functions.
+    Returns EA helper/operator functions for the MLP config.
     """
 
     widths = [int(w) for w in cfg["search"]["widths"]]
@@ -132,3 +143,172 @@ def make_ea_ops(cfg):
 
     return random_cand, freeze_cand, repair_cand, cx_cand, mut_cand
     
+
+
+def make_cnv_ea_ops(cfg):
+    """
+    Returns EA helper/operator functions for the CNV config.
+    """
+
+    s = cfg["search"]
+    qs = s["quant_space"]
+    defaults = cfg["model"]["defaults"]
+    stage1_choices = [int(x) for x in s["conv_stage1"]]
+    stage2_choices = [int(x) for x in s["conv_stage2"]]
+    stage3_choices = [int(x) for x in s["conv_stage3"]]
+    fc_choices = [int(x) for x in s["fc_widths"]]
+    fixed_in_bits = int(defaults["in_bits"])
+
+    # Search space helpers (candidate generation)
+
+    def stages_to_conv(c1, c2, c3):
+        return [int(c1), int(c1), int(c2), int(c2), int(c3), int(c3)]
+
+    def conv_to_stages(conv_channels):
+        cc = list(conv_channels or [])
+        if len(cc) == 6:
+            return [int(cc[0]), int(cc[2]), int(cc[4])]
+        if len(cc) == 3:
+            return [int(cc[0]), int(cc[1]), int(cc[2])]
+        return None
+
+    def random_quant():
+        return {
+            "WB": int(random.choice(qs["weight_bits"])),
+            "AB": int(random.choice(qs["act_bits"])),
+            "IB": fixed_in_bits,
+        }
+
+    def random_cand():
+        c1 = int(random.choice(stage1_choices))
+        c2 = int(random.choice(stage2_choices))
+        c3 = int(random.choice(stage3_choices))
+        f1 = int(random.choice(fc_choices))
+        f2 = int(random.choice(fc_choices))
+        return {
+            "conv_channels": stages_to_conv(c1, c2, c3),
+            "fc_features": [f1, f2],
+            "quant": random_quant(),
+        }
+
+    def freeze_cand(c):
+        return {
+            "conv_channels": list(c.get("conv_channels", [])),
+            "fc_features": list(c.get("fc_features", [])),
+            "quant": dict(c.get("quant", {})),
+        }
+    
+
+    # EA operators: repair, crossover, mutation
+
+    def repair_quant(q):
+        q = dict(q or {})
+        wb_choices = [int(x) for x in qs["weight_bits"]]
+        ab_choices = [int(x) for x in qs["act_bits"]]
+        wb = int(q.get("WB", random.choice(wb_choices)))
+        ab = int(q.get("AB", random.choice(ab_choices)))
+        if wb not in wb_choices:
+            wb = int(random.choice(wb_choices))
+        if ab not in ab_choices:
+            ab = int(random.choice(ab_choices))
+        return {"WB": wb, "AB": ab, "IB": fixed_in_bits}
+
+    def repair_conv_channels(conv_channels):
+        stages = conv_to_stages(conv_channels)
+        if stages is None:
+            c1 = int(random.choice(stage1_choices))
+            c2 = int(random.choice(stage2_choices))
+            c3 = int(random.choice(stage3_choices))
+            return stages_to_conv(c1, c2, c3)
+        c1, c2, c3 = stages
+        if c1 not in stage1_choices:
+            c1 = int(random.choice(stage1_choices))
+        if c2 not in stage2_choices:
+            c2 = int(random.choice(stage2_choices))
+        if c3 not in stage3_choices:
+            c3 = int(random.choice(stage3_choices))
+        return stages_to_conv(c1, c2, c3)
+
+    def repair_fc_features(fc_features):
+        ff = list(fc_features or [])
+        if len(ff) < 2:
+            ff = ff + [int(random.choice(fc_choices)) for _ in range(2 - len(ff))]
+        elif len(ff) > 2:
+            ff = ff[:2]
+        ff = [int(x) if int(x) in fc_choices else int(random.choice(fc_choices)) for x in ff]
+        return ff
+
+    def repair_cand(ind):
+        ind["conv_channels"] = repair_conv_channels(ind.get("conv_channels", []))
+        ind["fc_features"] = repair_fc_features(ind.get("fc_features", []))
+        ind["quant"] = repair_quant(ind.get("quant", {}))
+        return ind
+
+    def cx_cand(ind1, ind2):
+        # conv channels crossover
+        s1 = conv_to_stages(ind1.get("conv_channels", []))
+        s2 = conv_to_stages(ind2.get("conv_channels", []))
+        if s1 is None:
+            s1 = conv_to_stages(random_cand()["conv_channels"])
+        if s2 is None:
+            s2 = conv_to_stages(random_cand()["conv_channels"])
+        for i in range(3):
+            if random.random() < 0.5:
+                s1[i], s2[i] = s2[i], s1[i]
+        ind1["conv_channels"] = repair_conv_channels(stages_to_conv(*s1))
+        ind2["conv_channels"] = repair_conv_channels(stages_to_conv(*s2))
+
+        # fc features crossover
+        f1 = list(ind1.get("fc_features", []))
+        f2 = list(ind2.get("fc_features", []))
+        f1 = repair_fc_features(f1)
+        f2 = repair_fc_features(f2)
+        for i in range(2):
+            if random.random() < 0.5:
+                f1[i], f2[i] = f2[i], f1[i]
+        ind1["fc_features"] = repair_fc_features(f1)
+        ind2["fc_features"] = repair_fc_features(f2)
+
+        # quant crossover
+        q1 = dict(ind1.get("quant", {}))
+        q2 = dict(ind2.get("quant", {}))
+        for k in ["WB", "AB"]:
+            if random.random() < 0.5:
+                q1[k], q2[k] = q2.get(k, q1.get(k)), q1.get(k, q2.get(k))
+        ind1["quant"] = repair_quant(q1)
+        ind2["quant"] = repair_quant(q2)
+
+        return ind1, ind2
+
+    def mut_cand(ind):
+        # random mutation
+        r = random.random()
+        if r < 0.35:
+            stages = conv_to_stages(ind.get("conv_channels", []))
+            if stages is None:
+                stages = conv_to_stages(random_cand()["conv_channels"])
+            which = random.choice([0, 1, 2])
+            if which == 0:
+                stages[0] = int(random.choice(stage1_choices))
+            elif which == 1:
+                stages[1] = int(random.choice(stage2_choices))
+            else:
+                stages[2] = int(random.choice(stage3_choices))
+            ind["conv_channels"] = repair_conv_channels(stages_to_conv(*stages))
+        elif r < 0.65:
+            ff = repair_fc_features(ind.get("fc_features", []))
+            which = random.choice([0, 1])
+            ff[which] = int(random.choice(fc_choices))
+            ind["fc_features"] = repair_fc_features(ff)
+        elif r < 0.85:
+            q = dict(ind.get("quant", {}))
+            q["WB"] = int(random.choice(qs["weight_bits"]))
+            ind["quant"] = repair_quant(q)
+        else:
+            q = dict(ind.get("quant", {}))
+            q["AB"] = int(random.choice(qs["act_bits"]))
+            ind["quant"] = repair_quant(q)
+        return (repair_cand(ind),)
+
+
+    return random_cand, freeze_cand, repair_cand, cx_cand, mut_cand

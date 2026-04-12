@@ -1,9 +1,10 @@
 import argparse, json, pathlib, shlex, tempfile, copy, yaml, torch
 import pandas as pd
-from nas.train import train_full, make_test_dataloader, build_jsc_model, eval_acc
-from nas.utils import cand_to_json, ensure_clean_dir
+from nas.train import train_full, eval_acc
+from nas.utils import cand_to_json, cand_brief, ensure_clean_dir
+from nas.task_factory import make_dataloaders, make_test_dataloader, build_model
 from nas.unstructured_pruning import prune_unstructured_weights_file
-from nas.structured_pruning import prune_structured_neurons_weights_file, make_structured_sweep_vals
+from nas.structured_pruning import prune_structured_weights_file, make_structured_sweep_vals
 from finn_integration.finn_client import run_docker
 from finn_integration.report_parser import parse_build
 
@@ -23,6 +24,7 @@ def main():
     finn_cfg = yaml.safe_load(open(args.finn_cfg))
 
     device = "cuda" if torch.cuda.is_available() and cfg["ea"]["cuda"] else "cpu"
+    _, dl_va = make_dataloaders(cfg, phase="full")
     dl_te = make_test_dataloader(cfg)
 
     run_dir = pathlib.Path(args.run_dir)
@@ -50,14 +52,23 @@ def main():
         cand_path.write_text(cand_to_json(cand), encoding="utf-8")
 
         base_wpath = wrk / "cand_full.pt"
-        print(f"\n[FINAL] Training {i+1}/{args.top_k} hash={hsh} cand={cand}")
-        acc = train_full(cfg, cand, str(base_wpath))
-        print(f"[FINAL] full_train val_acc={acc:.4f}")
+        reuse_wpath = final_root / "baseline" / f"{i+1:02d}_{hsh}" / "cand_full.pt"
+
+        if args.pruning_mode != "baseline" and reuse_wpath.exists():
+            base_wpath.write_bytes(reuse_wpath.read_bytes())
+            model = build_model(cfg, cand)
+            model.load_state_dict(torch.load(str(base_wpath), map_location="cpu"))
+            acc = float(eval_acc(model.to(device), dl_va, device))
+            print(f"\n[FINAL] Reused baseline {i+1}/{args.top_k} hash={hsh} -> full_train val_acc={acc:.4f}")
+        else:
+            print(f"\n[FINAL] Training {i+1}/{args.top_k} hash={hsh} cand={cand}")
+            acc = train_full(cfg, cand, str(base_wpath))
+            print(f"[FINAL] full_train val_acc={acc:.4f}")
 
         if args.pruning_mode == "structured":
-            sweep_vals = make_structured_sweep_vals(cand["hidden"], cfg["finalists"]["pruning"]["structured"])
+            sweep_vals = make_structured_sweep_vals(cfg, cand, cfg["pruning"]["structured"])
         else:
-            sweep_vals = cfg["finalists"]["pruning"][args.pruning_mode]
+            sweep_vals = cfg["pruning"][args.pruning_mode]
 
         for val in sweep_vals:
             if args.pruning_mode == "structured":
@@ -85,28 +96,29 @@ def main():
                     cfg, cand,
                     str(base_wpath), str(wpath),
                     target_sparsity=val,
-                    finetune=True
+                    finetune=True,
+                    base_acc=acc
                 )
 
             else:  # structured
                 wpath = wrk_sp / "cand_pruned.pt"
-                prune_stats = prune_structured_neurons_weights_file(
+                prune_stats = prune_structured_weights_file(
                     cfg, cand,
                     str(base_wpath), str(wpath),
                     keep_ratio=val,
                     align=4,
                     min_units=4,
-                    finetune=True
+                    finetune=True,
+                    base_acc=acc
                 )
                 cand_for_build = prune_stats["new_cand"]
 
             cand_path = wrk_sp / "cand.json"
             cand_path.write_text(cand_to_json(cand_for_build), encoding="utf-8")
             
-            test_model = build_jsc_model(cfg, cand_for_build)
+            test_model = build_model(cfg, cand_for_build)
             test_model.load_state_dict(torch.load(str(wpath), map_location="cpu"))
-            test_model = test_model.to(device)
-            final_test_acc = float(eval_acc(test_model, dl_te, device))
+            final_test_acc = float(eval_acc(test_model.to(device), dl_te, device))
             print(f"[FINAL] {tag} -> TEST acc={final_test_acc:.4f}")
 
             finalist_summary = {
@@ -170,12 +182,11 @@ def main():
                 "val_acc_before": float(acc),
                 "final_test_acc": final_test_acc,
 
-                "orig_hidden": str(cand.get("hidden", [])),
-                "final_hidden": str(cand_for_build.get("hidden", [])),
-                "quant": str(cand_for_build.get("quant", {})),
+                "orig_cand": cand_brief(cand),
+                "final_cand": cand_brief(cand_for_build),
 
                 "target_sparsity": val if args.pruning_mode == "unstructured" else None,
-                "keep_ratio": json.dumps(val) if args.pruning_mode == "structured" else None,
+                "keep_ratio": val if args.pruning_mode == "structured" else None,
 
                 "LUT": post.get("LUT"),
                 "FF": post.get("FF"),

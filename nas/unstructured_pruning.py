@@ -1,6 +1,7 @@
 import os, torch
 from brevitas.nn import QuantLinear, QuantConv2d
-from nas.train import make_dataloaders, build_jsc_model, eval_acc, train
+from nas.task_factory import make_dataloaders, build_model
+from nas.train import eval_acc, train_finetune
 
 
 def build_unstructured_weight_masks(model):
@@ -57,7 +58,7 @@ def apply_unstructured_global_magnitude_prune(model, target_sparsity, min_retain
             continue
         if not hasattr(module, "weight") or module.weight is None:
             continue
-        w = module.weight.data
+        w = module.weight
         n = int(w.numel())
         if n <= int(min_retain_per_layer):
             continue
@@ -88,11 +89,11 @@ def apply_unstructured_global_magnitude_prune(model, target_sparsity, min_retain
 
 
 
-def prune_unstructured_weights_file(cfg, cand, in_weights, out_weights, target_sparsity, min_retain_per_layer=64, finetune=True):
+def prune_unstructured_weights_file(cfg, cand, in_weights, out_weights, target_sparsity, min_retain_per_layer=64, finetune=True, base_acc=None):
     device = "cuda" if torch.cuda.is_available() and cfg["ea"]["cuda"] else "cpu"
-    dl_tr, dl_va = make_dataloaders(cfg)
+    dl_tr, dl_va = make_dataloaders(cfg, phase="finetune")
 
-    model = build_jsc_model(cfg, cand)
+    model = build_model(cfg, cand)
     model.load_state_dict(torch.load(in_weights, map_location="cpu"))
     model.eval()
 
@@ -102,16 +103,12 @@ def prune_unstructured_weights_file(cfg, cand, in_weights, out_weights, target_s
     print(f"[PRUNING] {target_sparsity*100}% -> RAW val_acc={acc_raw:.4f}")
 
     # Finetune (optional)
-    acc_ft = None
-    if finetune and target_sparsity > 0.0:
+    acc_ft = None; eps = 0.02
+    if (finetune and target_sparsity > 0.0) and (acc_raw + eps < base_acc if base_acc is not None else True):
         weight_masks = build_unstructured_weight_masks(model)
-        acc_ft = train(
+        acc_ft = train_finetune(
             cfg, out_weights,
             model=model,
-            epochs=cfg["finalists"]["finetune"]["epochs"],
-            lr=cfg["finalists"]["finetune"]["lr"],
-            weight_decay=cfg["finalists"]["finetune"]["weight_decay"],
-            early_stop_patience=cfg["finalists"]["finetune"]["early_stop_patience"],
             dl_tr=dl_tr, dl_va=dl_va,
             weight_masks=weight_masks
         )

@@ -7,64 +7,65 @@ data:
 
 # Task
 task:
+  name: jsc_mlp
   in_features: 16
   n_classes: 5
 
-# Quick train params per candidate
+# Different training phases
 train:
-  batch_size: 2048
-  val_batch_size: 4096
-  epochs: 16
-  lr: 0.001
-  weight_decay: 0.001
-
-# Full train for finalists
-train_full:
-  epochs: 1000
-  lr: 0.001
-  weight_decay: 0.001
-  early_stop_patience: 50
-  min_delta: 0.0001
-  min_epochs: 50
-
-# Optional post-hoc pruning and finetuning for finalists
-finalists:
-  pruning:
-    unstructured: [0.0, 0.3, 0.5, 0.7]
-    structured: [1.0, 0.75, 0.5]
-    baseline: [0.0]
-  finetune:
+  quick: # NAS
+    batch_size: 2048
+    val_batch_size: 4096
+    epochs: 16
+    lr: 0.001
+    weight_decay: 0.001
+  full: # finalists
+    batch_size: 2048
+    val_batch_size: 4096
+    epochs: 500
+    lr: 0.001
+    weight_decay: 0.001
+    early_stop_patience: 50
+    min_delta: 0.0001
+    min_epochs: 50
+  finetune: # post-pruning
+    batch_size: 2048
+    val_batch_size: 4096
     epochs: 25
     lr: 0.0003
     weight_decay: 0.001
     early_stop_patience: 10
 
+# Optional post-hoc pruning for finalists
+pruning:
+  unstructured: [0.0, 0.3, 0.5, 0.7]
+  structured: [1.0, 0.75, 0.5]
+  baseline: [0.0]
+
 # FINN build params
 finn:
   max_retries: 5
   target_clk_mhz: 200
+  target_fps: 1000
   board: Ultra96-V2
   shell_flow: VIVADO_ZYNQ
-  folding: latency # not used atm
-  folding_cfg_dir: baselines/finn_jsc/folding_cfgs # not used atm
   tmp_root: work # all per-candidate outputs here
 
 # Fitness from FINN report + accuracy
 fitness:
-  target_accuracy: 0.90
-  min_acc: 0.73
+  target_accuracy: 0.76
   weights:
-    acc: 0.6
-    lut: 0.15
-    dsp: 0.10
-    bram: 0.10
+    acc: 0.67
+    lut: 0.17
+    dsp: 0.00
+    bram: 0.11
     latency: 0.05
   # Normalizers to keep terms ~O(1)
   norm:
-    lut: 50000
-    dsp: 200
-    bram_18k: 100
-    latency_ns: 1000
+    lut: 2000
+    dsp: 1
+    bram_18k: 8
+    latency_ns: 100000
 
 # EA search space
 search:
