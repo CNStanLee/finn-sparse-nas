@@ -4,7 +4,7 @@ from threading import Thread, Lock, Semaphore
 from deap import base, creator, tools
 
 from nas.train import train_quick
-from nas.utils import cand_to_json, cand_hash, ensure_clean_dir
+from nas.utils import cand_to_json, cand_hash, cand_brief, ensure_clean_dir
 from nas.ea_ops import make_ea_ops
 from finn_integration.finn_client import run_docker
 from finn_integration.report_parser import parse_build
@@ -17,7 +17,7 @@ def fitness_from_report(rep, cfg, acc):
     dsp = r.get("DSP", 0)         / max(1, N["dsp"])
     bram = r.get("BRAM_18K", 0)   / max(1, N["bram_18k"])
     lat = r.get("latency_ns", 0)  / max(1, N["latency_ns"])
-    acc_term = 0.0 if acc >= cfg["fitness"]["min_acc"] else max(0.0, cfg["fitness"]["target_accuracy"] - acc)
+    acc_term = max(0.0, cfg["fitness"]["target_accuracy"] - acc)
     # final fitness: lower is better
     return float(W["acc"] * acc_term) + (W["lut"] * lut) + (W["dsp"] * dsp) + (W["bram"] * bram) + (W["latency"] * lat)
 
@@ -67,7 +67,7 @@ def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path
             fit = fitness_from_report(rep, cfg, acc)
             with recs_lock:
                 recs.append([g, hsh, cand, fit, acc, lut, dsp, bram, lat, str(bdir / "report_summary.json"), True])
-            print(f" {cand['hidden']} {cand['quant']} -> acc={acc:.3f} fit={fit:.4f}  LUT={lut} DSP={dsp} BRAM={bram} lat_ns={lat}")
+            print(f" {cand_brief(cand)} -> acc={acc:.3f} fit={fit:.4f}  LUT={lut} DSP={dsp} BRAM={bram} lat_ns={lat}")
         else:
             with recs_lock:
                 recs.append([g, hsh, cand, np.inf, acc, np.nan, np.nan, np.nan, np.nan, "", False])
@@ -77,6 +77,8 @@ def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path
 
 def ea_loop(cfg, finn_cfg, run_dir):
     random.seed(cfg["ea"]["seed"]); np.random.seed(cfg["ea"]["seed"]); torch.manual_seed(cfg["ea"]["seed"])
+
+    print(f"\nconfig: {cfg['task']['name'].upper()}")
 
     # resume log
     pkl = run_dir / pathlib.Path(cfg["ea"]["pickle_path"])
@@ -90,7 +92,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
 
     # DEAP setup: single-objective EA or multi-objective (Pareto)
     mode = (cfg["ea"].get("mode", "single").lower() == "pareto")
-    print(f"\nEA mode selected: {cfg["ea"].get("mode", "single").upper()}")
+    print(f"\nEA mode selected: {cfg['ea'].get('mode', 'single').upper()}")
 
     if mode: # pareto
         try:
@@ -130,20 +132,21 @@ def ea_loop(cfg, finn_cfg, run_dir):
     # init population
     if df.empty:
         pop = [repair_cand(toolbox.individual()) for _ in range(int(cfg["ea"]["pop_size"]))]
-        gen = 0
+        start_gen = 0
     else:
-        gen = int(df["gen"].max())
-        pop = [as_ind(c) for c in df[df["gen"] == gen]["cand"].tolist()]
+        last_gen = int(df["gen"].max())
+        pop = [as_ind(c) for c in df[df["gen"] == last_gen]["cand"].tolist()]
+        start_gen = last_gen + 1
 
     # -------------------------------------------------
     # Generational loop
     # -------------------------------------------------
-    for g in range(gen, int(cfg["ea"]["generations"])):
+    for g in range(start_gen, int(cfg["ea"]["generations"])):
         print(f"\n[NAS] Generation {g}")
         recs = []
         recs_lock = Lock()
         threads = []
-        sem = Semaphore(8)
+        sem = Semaphore(4)
 
         for ind in pop:
             repair_cand(ind)
@@ -155,7 +158,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
                 row = old.iloc[0]
                 with recs_lock:
                     recs.append([g, hsh, row["cand"], row["fitness"], row["val_acc"], row["LUT"], row["DSP"], row["BRAM_18K"], row["latency_ns"], row["report_path"], True])
-                print(f"  cached {row['cand']['hidden']} q={row['cand']['quant']} -> acc={row['val_acc']:.3f} fit={row['fitness']:.4f}")
+                print(f"  cached {cand_brief(row['cand'])} -> acc={row['val_acc']:.3f} fit={row['fitness']:.4f}")
                 continue
 
             wrk = run_dir / pathlib.Path(cfg["finn"]["tmp_root"]) / hsh
@@ -168,7 +171,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
 
             # quick training
             wpath = wrk / "cand.pt"
-            print(f"Training hash={hsh} hidden={cand_plain['hidden']} quant={cand_plain['quant']}")
+            print(f"Training hash={hsh} {cand_brief(cand_plain)}")
             acc = train_quick(cfg, cand_plain, str(wpath))
 
             qonnx = wrk / "cand.qonnx"
@@ -272,21 +275,18 @@ def ea_loop(cfg, finn_cfg, run_dir):
         top = (df[df["evaluated"] == True]
                 .sort_values(["fitness", "val_acc"], ascending=[True, False])
                 .drop_duplicates("hash", keep="first")
-                .head(10).copy())
-        top = top.reset_index(drop=True)
-        top["cand_brief"] = top["cand"].apply(lambda c: f"h={c.get('hidden', [])} q={c.get('quant', {})}")
+                .head(10).copy().reset_index(drop=True))
+        top["cand_brief"] = top["cand"].apply(cand_brief)
         print(top[["cand_brief","fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns"]])
     else:
         print("\n[NAS] Pareto front (first nondominated set):")
         rows = df[df["evaluated"] == True].drop_duplicates("hash", keep="first").copy()
-        # rows = rows[rows["val_acc"] >= cfg["fitness"]["min_acc"]] # (optional) only show reasonable accuracies
         inds = []
         for _, r in rows.iterrows():
             ind = IndCls(copy.deepcopy(dict(r["cand"])))
             ind.fitness.values = pareto_objectives_from_row(r, cfg)
             inds.append(ind)
         front = tools.sortNondominated(inds, k=len(inds), first_front_only=True)[0]
-        # build a small table
         front_rows = []
         for ind in front:
             hsh = cand_hash(ind, cfg)
@@ -294,8 +294,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
             front_rows.append(rr)
         pf = pd.DataFrame(front_rows).drop_duplicates("hash", keep="first")
         pf = pf.sort_values(["val_acc"], ascending=False).reset_index(drop=True)
-        pf["cand_brief"] = pf["cand"].apply(lambda c: f"h={c.get('hidden', [])} q={c.get('quant', {})}")
-        # save and print
+        pf["cand_brief"] = pf["cand"].apply(cand_brief)
         pf[["hash","cand","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].to_csv(run_dir / "pareto_front.csv", index=False)
         print(pf[["cand_brief","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].head(15))
 

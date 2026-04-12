@@ -7,7 +7,100 @@ data:
 
 # Task
 task:
+  name: cifar10_cnv
   in_channels: 3
   img_h: 32
   img_w: 32
   n_classes: 10
+
+# Different training phases
+train:
+  quick: # NAS
+    batch_size: 128
+    val_batch_size: 128
+    epochs: 50
+    lr: 0.04
+    weight_decay: 0.0
+    lr_decay_every: 5
+    lr_decay_factor: 0.5
+    train_subset_per_class: 4096
+    val_subset_per_class: 512
+  full: # finalists
+    batch_size: 128
+    val_batch_size: 128
+    epochs: 750
+    lr: 0.02
+    weight_decay: 0.0
+    lr_decay_every: 40
+    lr_decay_factor: 0.5
+  finetune: # post-pruning
+    batch_size: 128
+    val_batch_size: 128
+    epochs: 60
+    lr: 0.005
+    weight_decay: 0.0
+    lr_decay_every: 10
+    lr_decay_factor: 0.5
+
+# Optional post-hoc pruning for finalists
+pruning:
+  unstructured: [0.0, 0.3, 0.5, 0.7]
+  structured: [1.0, 0.75, 0.5]
+  baseline: [0.0]
+
+# FINN build params
+finn:
+  max_retries: 5
+  target_clk_mhz: 200
+  target_fps: 2500 # 3000
+  board: Ultra96-V2
+  shell_flow: VIVADO_ZYNQ
+  tmp_root: work
+
+# Fitness from FINN report + accuracy
+fitness:
+  target_accuracy: 0.86
+  weights:
+    acc: 0.70
+    lut: 0.15
+    dsp: 0.00
+    bram: 0.10
+    latency: 0.05
+  norm:
+    lut: 30000
+    dsp: 10
+    bram_18k: 150
+    latency_ns: 3000000
+
+# Defaults not part of the search space
+model:
+  defaults:
+    pool_after: [false, true, false, true, false, false]
+    kernel_size: 3
+    in_bits: 8
+
+# EA search space
+search:
+  conv_stage1: [32, 48, 64, 96]
+  conv_stage2: [64, 96, 128, 160]
+  conv_stage3: [128, 160, 192, 256]
+  fc_widths: [128, 256, 384, 512]
+  quant_space:
+    weight_bits: [1, 2]
+    act_bits: [1, 2, 4]
+
+# EA loop
+ea:
+  mode: pareto # single | pareto
+  pop_size: 25
+  generations: 15
+  elitism: 2
+  randoms: 4
+  cxpb: 0.4
+  mutpb: 0.7
+  tournsize: 2
+  root_path: results/nas
+  pickle_path: search.pkl
+  csv_out: search.csv
+  cuda: true
+  seed: 123
