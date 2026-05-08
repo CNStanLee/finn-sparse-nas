@@ -45,11 +45,20 @@ pruning:
 # FINN build params
 finn:
   max_retries: 5
-  target_clk_mhz: 200
-  target_fps: 1000
-  board: Ultra96-V2
+  target_clk_mhz: 1000
+  target_fps: 100000000000000000000000000 # MAX
+  board: ZCU104
   shell_flow: VIVADO_ZYNQ
+  folding_config_file: configs/folding/mlp_internal_embedded.json
+  mvau_wwidth_max: 10000 # this allows higher fifo reading weights
+  # folding_two_pass_relaxation: false # quick test no need for this.
   tmp_root: work # all per-candidate outputs here
+
+# Changhong
+# 2026/05/08
+# For JSC Classification task, according to CERN's documents and related papers, the targeted fps should be
+# at least 40MHz and the latency would be better within 100ns (although in practice, us level is good enough).
+# Now we try move the NAS from fully folded (PE=1 SIMD=1) to fully unrolled, and modify the board to ZCU104
 
 # Fitness from FINN report + accuracy
 fitness:
@@ -76,6 +85,11 @@ search:
     weight_bits: [2, 3, 4, 8]
     act_bits:    [3, 4, 8]
     out_bits:    [3, 4, 7, 8]
+  sparsity:
+    targets: [0.0, 0.3, 0.5, 0.7]
+    min_retain_per_layer: 64
+    finetune: false
+    evaluate_dense_reference: false
 
 # EA loop
 ea:

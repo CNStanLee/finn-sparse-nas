@@ -18,6 +18,8 @@ def make_mlp_ea_ops(cfg):
 
     widths = [int(w) for w in cfg["search"]["widths"]]
     qs = cfg["search"]["quant_space"]
+    sparsity_cfg = cfg["search"].get("sparsity", {})
+    sparsity_targets = [float(x) for x in sparsity_cfg.get("targets", [0.0])]
     minL = int(cfg["search"]["min_layers"])
     maxL = int(cfg["search"]["max_layers"])
 
@@ -35,12 +37,19 @@ def make_mlp_ea_ops(cfg):
         wb = int(random.choice([b for b in qs["weight_bits"] if b < 8] if max(ia, ha, oa) < 8 else qs["weight_bits"]))
         return {"WB": wb, "IA": ia, "HA": ha, "OA": oa}
 
+    def random_sparsity():
+        return {"target": float(random.choice(sparsity_targets))}
+
     def random_cand():
-        return {"hidden": random_hidden(), "quant": random_quant()}
+        return {"hidden": random_hidden(), "quant": random_quant(), "sparsity": random_sparsity()}
 
     def freeze_cand(c):
         # store plain dicts in DF/pickle
-        return {"hidden": list(c.get("hidden", [])), "quant": dict(c.get("quant", {}))}
+        return {
+            "hidden": list(c.get("hidden", [])),
+            "quant": dict(c.get("quant", {})),
+            "sparsity": repair_sparsity(c.get("sparsity", {})),
+        }
 
 
     # EA operators: repair, crossover, mutation
@@ -73,9 +82,17 @@ def make_mlp_ea_ops(cfg):
                 wb = random.choice(small)
         return {"WB": wb, "IA": ia, "HA": ha, "OA": oa}
 
+    def repair_sparsity(s):
+        s = dict(s or {})
+        target = float(s.get("target", random.choice(sparsity_targets)))
+        if target not in sparsity_targets:
+            target = min(sparsity_targets, key=lambda x: abs(x - target))
+        return {"target": float(target)}
+
     def repair_cand(ind):
         ind["hidden"] = repair_hidden(ind.get("hidden", []))
         ind["quant"] = repair_quant(ind.get("quant", {}))
+        ind["sparsity"] = repair_sparsity(ind.get("sparsity", {}))
         return ind   
 
     def cx_cand(ind1, ind2):
@@ -98,6 +115,9 @@ def make_mlp_ea_ops(cfg):
                 q1[k], q2[k] = q2.get(k, q1.get(k)), q1.get(k, q2.get(k))
         ind1["quant"] = repair_quant(q1)
         ind2["quant"] = repair_quant(q2)
+        if random.random() < 0.5:
+            s1, s2 = ind1.get("sparsity", {}), ind2.get("sparsity", {})
+            ind1["sparsity"], ind2["sparsity"] = repair_sparsity(s2), repair_sparsity(s1)
         return ind1, ind2
 
     def mut_cand(ind):
@@ -138,6 +158,12 @@ def make_mlp_ea_ops(cfg):
                     valid_wb = qs["weight_bits"]
                 q["WB"] = int(random.choice(valid_wb))
         ind["quant"] = repair_quant(q)
+
+        # sparsity mutation
+        if random.random() < 0.35:
+            ind["sparsity"] = random_sparsity()
+        else:
+            ind["sparsity"] = repair_sparsity(ind.get("sparsity", {}))
         return (ind,)
     
 

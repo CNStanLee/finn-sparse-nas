@@ -6,8 +6,184 @@ from deap import base, creator, tools
 from nas.train import train_quick
 from nas.utils import cand_to_json, cand_hash, cand_brief, ensure_clean_dir
 from nas.ea_ops import make_ea_ops
+from nas.unstructured_pruning import prune_unstructured_weights_file, summarize_unstructured_weights_file
 from finn_integration.finn_client import run_docker
 from finn_integration.report_parser import parse_build
+
+
+def cand_arch_key(cand):
+    """Architecture identity without sparsity target, used for dense-vs-sparse grouping."""
+    c = copy.deepcopy(dict(cand))
+    c.pop("sparsity", None)
+    return json.dumps(c, sort_keys=True, separators=(",", ":"))
+
+
+def sparsity_target(cand):
+    return float(cand.get("sparsity", {}).get("target", 0.0))
+
+
+def resource_delta(after, before):
+    out = {}
+    for key in ["LUT", "DSP", "BRAM_18K", "URAM", "latency_ns", "throughput_fps"]:
+        a = after.get(key)
+        b = before.get(key)
+        if a is None or b in [None, 0]:
+            out[f"{key}_delta"] = None
+            out[f"{key}_reduction_frac"] = None
+            continue
+        out[f"{key}_delta"] = float(a) - float(b)
+        out[f"{key}_reduction_frac"] = (float(b) - float(a)) / float(b)
+    return out
+
+
+def run_finn_build(cfg, finn_cfg, cand_path, wpath, qonnx, bdir, hsh, name_suffix=""):
+    max_retries = cfg["finn"]["max_retries"]
+    ret = -1
+    for attempt in range(1, max_retries + 1):
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as td:
+            _finn_cfg = copy.deepcopy(finn_cfg)
+            _finn_cfg["path"]["tmp"] = td
+            cmd = (
+                f"python -m nas.build_finn "
+                f"--cfg {shlex.quote(cfg['_cfg_path'])} "
+                f"--cand {shlex.quote(str(cand_path))} "
+                f"--weights {shlex.quote(str(wpath))} "
+                f"--qonnx {shlex.quote(str(qonnx))} "
+                f"--build_dir {shlex.quote(str(bdir))}"
+            )
+            cname = f"{hsh}{name_suffix}_att{attempt}"
+            ret = run_docker(cmd, _finn_cfg, str(bdir), name=cname)
+            if ret == 0:
+                break
+            print(f"  [NAS] Attempt {attempt}/{max_retries} failed for {hsh}{name_suffix}, "
+                  f"rc={ret}" + (" - retrying..." if attempt < max_retries else " - giving up."))
+    return ret
+
+
+def add_storage_reduction(summary, cand):
+    q = cand.get("quant", {})
+    weight_bits = int(q.get("WB", 1))
+    total = int(summary.get("total_params", 0))
+    nonzero = int(summary.get("total_nonzero", 0))
+    dense_bits = total * weight_bits
+    nonzero_bits = nonzero * weight_bits
+    summary["weight_bits"] = weight_bits
+    summary["dense_weight_bits"] = int(dense_bits)
+    summary["nonzero_weight_bits"] = int(nonzero_bits)
+    summary["zero_weight_bits"] = int(max(0, dense_bits - nonzero_bits))
+    summary["weight_storage_reduction_frac_dense_equivalent"] = (
+        0.0 if dense_bits == 0 else float(dense_bits - nonzero_bits) / float(dense_bits)
+    )
+    return summary
+
+
+def prepare_sparse_weights(cfg, cand, dense_wpath, sparse_wpath, base_acc):
+    target = sparsity_target(cand)
+    sp_cfg = cfg["search"].get("sparsity", {})
+    min_retain = int(sp_cfg.get("min_retain_per_layer", 64))
+    finetune = bool(sp_cfg.get("finetune", False))
+
+    if target > 0.0:
+        summary = prune_unstructured_weights_file(
+            cfg, cand,
+            str(dense_wpath), str(sparse_wpath),
+            target_sparsity=target,
+            min_retain_per_layer=min_retain,
+            finetune=finetune,
+            base_acc=base_acc,
+        )
+        acc = summary.get("val_acc_after_finetune")
+        if acc is None:
+            acc = summary.get("val_acc_after_prune_raw", base_acc)
+    else:
+        sparse_wpath.write_bytes(dense_wpath.read_bytes())
+        summary = summarize_unstructured_weights_file(cfg, cand, str(sparse_wpath))
+        summary["val_acc_after_prune_raw"] = float(base_acc)
+        summary["val_acc_after_finetune"] = None
+        acc = base_acc
+
+    summary["base_val_acc_before_prune"] = float(base_acc)
+    summary["selected_val_acc"] = float(acc)
+    summary = add_storage_reduction(summary, cand)
+    return float(acc), summary
+
+
+def write_sparse_search_report(df, run_dir):
+    rows = df[df["evaluated"] == True].drop_duplicates("hash", keep="first").copy()
+    if rows.empty:
+        return
+
+    numeric_cols = [
+        "target_sparsity", "achieved_sparsity", "sparse_total_params",
+        "sparse_total_nonzero", "weight_storage_reduction_frac",
+        "val_acc", "LUT", "DSP", "BRAM_18K", "latency_ns",
+    ]
+    for col in numeric_cols:
+        if col in rows.columns:
+            rows[col] = pd.to_numeric(rows[col], errors="coerce")
+
+    baseline_rows = (
+        rows.sort_values(["arch_key", "target_sparsity", "achieved_sparsity"])
+            .drop_duplicates("arch_key", keep="first")
+            .set_index("arch_key")
+    )
+
+    out_rows = []
+    for _, row in rows.iterrows():
+        base = baseline_rows.loc[row["arch_key"]]
+        rec = row.to_dict()
+        rec["baseline_hash"] = base["hash"]
+        rec["baseline_target_sparsity"] = base.get("target_sparsity")
+        rec["baseline_achieved_sparsity"] = base.get("achieved_sparsity")
+        for key in ["LUT", "DSP", "BRAM_18K", "latency_ns"]:
+            a = row.get(key)
+            b = base.get(key)
+            if pd.isna(a) or pd.isna(b) or float(b) == 0.0:
+                rec[f"{key}_vs_baseline_delta"] = np.nan
+                rec[f"{key}_vs_baseline_reduction_frac"] = np.nan
+            else:
+                rec[f"{key}_vs_baseline_delta"] = float(a) - float(b)
+                rec[f"{key}_vs_baseline_reduction_frac"] = (float(b) - float(a)) / float(b)
+        out_rows.append(rec)
+
+    summary = pd.DataFrame(out_rows)
+    summary["cand_brief"] = summary["cand"].apply(cand_brief)
+    summary.to_csv(run_dir / "sparse_search_summary.csv", index=False)
+
+    agg_cols = [
+        "target_sparsity", "achieved_sparsity", "weight_storage_reduction_frac",
+        "val_acc", "LUT", "DSP", "BRAM_18K", "latency_ns",
+        "LUT_vs_baseline_reduction_frac", "DSP_vs_baseline_reduction_frac",
+        "BRAM_18K_vs_baseline_reduction_frac", "latency_ns_vs_baseline_reduction_frac",
+    ]
+    agg = (
+        summary[agg_cols]
+        .groupby("target_sparsity", dropna=False)
+        .agg(["count", "mean", "min", "max"])
+    )
+    agg.to_csv(run_dir / "sparse_search_aggregate.csv")
+
+    json_summary = {
+        "note": (
+            "Resource reduction is computed against the lowest-sparsity evaluated "
+            "candidate with the same architecture and quantization. If only sparse "
+            "versions exist for an architecture, the baseline is not a true dense run."
+        ),
+        "num_evaluated": int(len(summary)),
+        "num_arch_groups": int(summary["arch_key"].nunique()),
+        "targets": sorted(float(x) for x in summary["target_sparsity"].dropna().unique()),
+        "best_by_fitness": summary.sort_values(["fitness", "val_acc"], ascending=[True, False]).head(10)[
+            [
+                "hash", "cand_brief", "fitness", "val_acc", "target_sparsity",
+                "achieved_sparsity", "weight_storage_reduction_frac",
+                "LUT", "DSP", "BRAM_18K", "latency_ns",
+                "LUT_vs_baseline_reduction_frac",
+                "BRAM_18K_vs_baseline_reduction_frac",
+            ]
+        ].to_dict(orient="records"),
+    }
+    with open(run_dir / "sparse_search_summary.json", "w") as f:
+        json.dump(json_summary, f, indent=2)
 
 
 def fitness_from_report(rep, cfg, acc):
@@ -34,30 +210,54 @@ def pareto_objectives_from_row(row, cfg):
     return (acc, lut, dsp, brm, lat)
 
 
-def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path, wpath, g, hsh, acc):
-    max_retries = cfg["finn"]["max_retries"]; ret = -1
+def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path, wpath, dense_wpath, g, hsh, acc, sparse_summary):
+    ret = -1
     with sem:
-        for attempt in range(1, max_retries + 1):
-            with tempfile.TemporaryDirectory(dir="/dev/shm") as td:
-                # export QONNX and build FINN inside container
-                _finn_cfg = copy.deepcopy(finn_cfg)
-                _finn_cfg["path"]["tmp"] = td
-                cmd = (
-                    f"python -m nas.build_finn "
-                    f"--cfg {shlex.quote(cfg['_cfg_path'])} "
-                    f"--cand {shlex.quote(str(cand_path))} "
-                    f"--weights {shlex.quote(str(wpath))} "
-                    f"--qonnx {shlex.quote(str(qonnx))} "
-                    f"--build_dir {shlex.quote(str(bdir))}"
-                )
-                ret = run_docker(cmd, _finn_cfg, str(bdir), name=f"{hsh}_att{attempt}")
-                if ret == 0:
-                    break
-                print(f"  [NAS] Attempt {attempt}/{max_retries} failed for {hsh}, "
-                      f"rc={ret}" + (" - retrying..." if attempt < max_retries else " - giving up."))
+        ret = run_finn_build(cfg, finn_cfg, cand_path, wpath, qonnx, bdir, hsh)
 
         if ret == 0:
             rep = parse_build(bdir)
+            dense_reference = None
+            if (
+                bool(cfg["search"].get("sparsity", {}).get("evaluate_dense_reference", False))
+                and sparsity_target(cand) > 0.0
+            ):
+                dense_bdir = pathlib.Path(str(bdir) + "_dense_reference")
+                dense_qonnx = pathlib.Path(str(qonnx)).with_name(pathlib.Path(str(qonnx)).stem + "_dense_reference.qonnx")
+                rc_dense = run_finn_build(
+                    cfg, finn_cfg, cand_path, dense_wpath, dense_qonnx,
+                    dense_bdir, hsh, name_suffix="_dense_ref"
+                )
+                if rc_dense == 0:
+                    dense_reference = parse_build(dense_bdir)
+                    with open(dense_bdir / "report_summary.json", "w") as f:
+                        json.dump(dense_reference, f, indent=2)
+
+            if sparse_summary is not None:
+                with open(bdir / "sparsity_summary.json", "w") as f:
+                    json.dump(sparse_summary, f, indent=2)
+                analysis = {
+                    "candidate": cand,
+                    "architecture_key": cand_arch_key(cand),
+                    "note": (
+                        "Resource deltas against dense equivalents require a matching "
+                        "target_sparsity=0 candidate in sparse_search_summary.csv. "
+                        "This file records per-candidate sparsity/storage effects and FINN estimates."
+                    ),
+                    "sparsity": sparse_summary,
+                    "estimate": rep.get("estimate", {}),
+                    "dense_reference_estimate": (dense_reference or {}).get("estimate"),
+                    "dense_reference_report": (
+                        str(pathlib.Path(str(bdir) + "_dense_reference") / "report_summary.json")
+                        if dense_reference is not None else None
+                    ),
+                    "resource_delta_vs_dense_reference": (
+                        resource_delta(rep.get("estimate", {}), dense_reference.get("estimate", {}))
+                        if dense_reference is not None else None
+                    ),
+                }
+                with open(bdir / "sparsity_resource_analysis.json", "w") as f:
+                    json.dump(analysis, f, indent=2)
             with open(bdir / "report_summary.json", "w") as f:
                 json.dump(rep, f, indent=2)
             print("[NAS] Parsed FINN report ->", bdir / "report_summary.json")
@@ -65,12 +265,29 @@ def build_task(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand, cand_path
             lut  = int(s.get("LUT", 0));      dsp  = int(s.get("DSP", 0))
             bram = int(s.get("BRAM_18K", 0)); lat  = float(s.get("latency_ns", 0))
             fit = fitness_from_report(rep, cfg, acc)
+            target_sp = sparsity_target(cand)
+            achieved_sp = float((sparse_summary or {}).get("achieved_sparsity", 0.0))
+            total_params = int((sparse_summary or {}).get("total_params", 0))
+            total_nonzero = int((sparse_summary or {}).get("total_nonzero", 0))
+            storage_red = float((sparse_summary or {}).get("weight_storage_reduction_frac_dense_equivalent", 0.0))
             with recs_lock:
-                recs.append([g, hsh, cand, fit, acc, lut, dsp, bram, lat, str(bdir / "report_summary.json"), True])
+                recs.append([
+                    g, hsh, cand, cand_arch_key(cand), target_sp, achieved_sp,
+                    total_params, total_nonzero, storage_red,
+                    fit, acc, lut, dsp, bram, lat,
+                    str(bdir / "report_summary.json"),
+                    str(bdir / "sparsity_summary.json") if sparse_summary is not None else "",
+                    str(bdir / "sparsity_resource_analysis.json") if sparse_summary is not None else "",
+                    True
+                ])
             print(f" {cand_brief(cand)} -> acc={acc:.3f} fit={fit:.4f}  LUT={lut} DSP={dsp} BRAM={bram} lat_ns={lat}")
         else:
             with recs_lock:
-                recs.append([g, hsh, cand, np.inf, acc, np.nan, np.nan, np.nan, np.nan, "", False])
+                recs.append([
+                    g, hsh, cand, cand_arch_key(cand), sparsity_target(cand), np.nan,
+                    np.nan, np.nan, np.nan,
+                    np.inf, acc, np.nan, np.nan, np.nan, np.nan, "", "", "", False
+                ])
 
         return ret
 
@@ -84,8 +301,25 @@ def ea_loop(cfg, finn_cfg, run_dir):
     pkl = run_dir / pathlib.Path(cfg["ea"]["pickle_path"])
     pkl.parent.mkdir(parents=True, exist_ok=True)
 
-    COLS = ["gen","hash","cand","fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns","report_path","evaluated"]
+    COLS = [
+        "gen","hash","cand","arch_key","target_sparsity","achieved_sparsity",
+        "sparse_total_params","sparse_total_nonzero","weight_storage_reduction_frac",
+        "fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns",
+        "report_path","sparsity_summary_path","sparsity_resource_analysis_path","evaluated"
+    ]
     df = pd.read_pickle(pkl) if pkl.exists() else pd.DataFrame(columns=COLS)
+    for col in COLS:
+        if col not in df.columns:
+            df[col] = np.nan
+    if not df.empty:
+        df["arch_key"] = df.apply(
+            lambda r: cand_arch_key(r["cand"]) if pd.isna(r.get("arch_key")) else r.get("arch_key"),
+            axis=1,
+        )
+        df["target_sparsity"] = df.apply(
+            lambda r: sparsity_target(r["cand"]) if pd.isna(r.get("target_sparsity")) else r.get("target_sparsity"),
+            axis=1,
+        )
 
     # EA helpers / operator functions
     random_cand, freeze_cand, repair_cand, cx_cand, mut_cand = make_ea_ops(cfg)
@@ -157,7 +391,19 @@ def ea_loop(cfg, finn_cfg, run_dir):
             if not old.empty:
                 row = old.iloc[0]
                 with recs_lock:
-                    recs.append([g, hsh, row["cand"], row["fitness"], row["val_acc"], row["LUT"], row["DSP"], row["BRAM_18K"], row["latency_ns"], row["report_path"], True])
+                    recs.append([
+                        g, hsh, row["cand"], row.get("arch_key", cand_arch_key(row["cand"])),
+                        row.get("target_sparsity", sparsity_target(row["cand"])),
+                        row.get("achieved_sparsity", np.nan),
+                        row.get("sparse_total_params", np.nan),
+                        row.get("sparse_total_nonzero", np.nan),
+                        row.get("weight_storage_reduction_frac", np.nan),
+                        row["fitness"], row["val_acc"], row["LUT"], row["DSP"], row["BRAM_18K"],
+                        row["latency_ns"], row["report_path"],
+                        row.get("sparsity_summary_path", ""),
+                        row.get("sparsity_resource_analysis_path", ""),
+                        True
+                    ])
                 print(f"  cached {cand_brief(row['cand'])} -> acc={row['val_acc']:.3f} fit={row['fitness']:.4f}")
                 continue
 
@@ -170,15 +416,18 @@ def ea_loop(cfg, finn_cfg, run_dir):
             cand_path.write_text(cand_to_json(cand_plain), encoding="utf-8")
 
             # quick training
-            wpath = wrk / "cand.pt"
+            dense_wpath = wrk / "cand_dense.pt"
             print(f"Training hash={hsh} {cand_brief(cand_plain)}")
-            acc = train_quick(cfg, cand_plain, str(wpath))
+            base_acc = train_quick(cfg, cand_plain, str(dense_wpath))
+            wpath = wrk / "cand.pt"
+            acc, sparse_summary = prepare_sparse_weights(cfg, cand_plain, dense_wpath, wpath, base_acc)
+            (wrk / "sparsity_summary.json").write_text(json.dumps(sparse_summary, indent=2), encoding="utf-8")
 
             qonnx = wrk / "cand.qonnx"
             bdir = wrk / "build"
 
             # build FINN concurrently inside container
-            thread = Thread(target=build_task, args=(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand_plain, cand_path, wpath, g, hsh, acc))
+            thread = Thread(target=build_task, args=(sem, recs_lock, recs, cfg, finn_cfg, qonnx, bdir, cand_plain, cand_path, wpath, dense_wpath, g, hsh, acc, sparse_summary))
             thread.start()
             threads.append(thread)
 
@@ -195,6 +444,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
             persist = persist.sort_values(["val_acc"], ascending=[False]).drop_duplicates("hash", keep="first")
         persist.to_pickle(pkl)
         persist.to_csv(run_dir / pathlib.Path(cfg["ea"]["csv_out"]), index=False)
+        write_sparse_search_report(persist, run_dir)
         df = persist
 
         # assign DEAP fitness values for selection (lower is better)
@@ -277,7 +527,7 @@ def ea_loop(cfg, finn_cfg, run_dir):
                 .drop_duplicates("hash", keep="first")
                 .head(10).copy().reset_index(drop=True))
         top["cand_brief"] = top["cand"].apply(cand_brief)
-        print(top[["cand_brief","fitness","val_acc","LUT","DSP","BRAM_18K","latency_ns"]])
+        print(top[["cand_brief","fitness","val_acc","target_sparsity","achieved_sparsity","LUT","DSP","BRAM_18K","latency_ns"]])
     else:
         print("\n[NAS] Pareto front (first nondominated set):")
         rows = df[df["evaluated"] == True].drop_duplicates("hash", keep="first").copy()
@@ -295,8 +545,8 @@ def ea_loop(cfg, finn_cfg, run_dir):
         pf = pd.DataFrame(front_rows).drop_duplicates("hash", keep="first")
         pf = pf.sort_values(["val_acc"], ascending=False).reset_index(drop=True)
         pf["cand_brief"] = pf["cand"].apply(cand_brief)
-        pf[["hash","cand","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].to_csv(run_dir / "pareto_front.csv", index=False)
-        print(pf[["cand_brief","val_acc","LUT","DSP","BRAM_18K","latency_ns"]].head(15))
+        pf[["hash","cand","val_acc","target_sparsity","achieved_sparsity","LUT","DSP","BRAM_18K","latency_ns"]].to_csv(run_dir / "pareto_front.csv", index=False)
+        print(pf[["cand_brief","val_acc","target_sparsity","achieved_sparsity","LUT","DSP","BRAM_18K","latency_ns"]].head(15))
 
 
 def main():

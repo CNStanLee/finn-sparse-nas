@@ -149,8 +149,13 @@ def main():
         enable_build_pdb_debug=False
     )
 
-    if args.folding_cfg is not None and str(args.folding_cfg).strip() != "":
-        build_kwargs["folding_config_file"] = args.folding_cfg
+    folding_cfg = args.folding_cfg or cfg["finn"].get("folding_config_file")
+    if folding_cfg is not None and str(folding_cfg).strip() != "":
+        build_kwargs["folding_config_file"] = folding_cfg
+    if "mvau_wwidth_max" in cfg["finn"]:
+        build_kwargs["mvau_wwidth_max"] = cfg["finn"]["mvau_wwidth_max"]
+    if "folding_two_pass_relaxation" in cfg["finn"]:
+        build_kwargs["folding_two_pass_relaxation"] = cfg["finn"]["folding_two_pass_relaxation"]
 
     bcfg = build_cfg.DataflowBuildConfig(**build_kwargs)
 

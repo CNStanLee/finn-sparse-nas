@@ -134,3 +134,18 @@ def prune_unstructured_weights_file(cfg, cand, in_weights, out_weights, target_s
         "out_weights": str(out_weights),
     }
     return summary
+
+
+def summarize_unstructured_weights_file(cfg, cand, weights, min_numel=0):
+    model = build_model(cfg, cand)
+    model.load_state_dict(torch.load(weights, map_location="cpu"))
+    model.eval()
+    sp, total, nz, per_layer = unstructured_sparsity_stats(model, min_numel=min_numel)
+    return {
+        "target_sparsity": float(cand.get("sparsity", {}).get("target", 0.0)),
+        "achieved_sparsity": float(sp),
+        "total_params": int(total),
+        "total_nonzero": int(nz),
+        "per_layer": per_layer,
+        "weights": str(weights),
+    }
